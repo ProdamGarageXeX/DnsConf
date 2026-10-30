@@ -1,0 +1,49 @@
+name: GeoHide check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    environment: DNS
+    env:
+      CLIENT_ID: ${{ secrets.CLIENT_ID }}
+    steps:
+      - name: Check proxies
+        run: |
+          set +e
+          ALLOW="159.194.200.0/24 193.233.112.0/24"
+          MY="https://raw.githubusercontent.com/ProdamGarageXeX/DnsConf/refs/heads/main/my-hosts"
+          GH="https://raw.githubusercontent.com/Internet-Helper/GeoHideDNS/refs/heads/main/hosts/hosts"
+
+          LIST=$({ curl -s "$MY"; echo; curl -s "$GH" | awk '/^# Google Gemini/{f=1;next} /^#/{f=0} f && NF'; } \
+            | tr -d '\r' | awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/')
+
+          echo "== NextDNS: gemini.google.com =="
+          curl -4 -s -o /dev/null --max-time 15 -w "%{remote_ip} %{http_code}\n" \
+            --doh-url "https://dns.nextdns.io/$CLIENT_ID" https://gemini.google.com/app
+
+          echo "== Proxies (200 = ok) =="
+          DEAD=" "
+          GOOD=""
+          for ip in $(echo "$LIST" | awk '{print $1}' | sort -u); do
+            code=$(curl -4 -s -o /dev/null --max-time 10 -w "%{http_code}" \
+              --resolve gemini.google.com:443:"$ip" https://gemini.google.com/app)
+            echo "$ip: $code"
+            if [ "$code" = "200" ]; then
+              [ -z "$GOOD" ] && GOOD="$ip"
+            else
+              DEAD="$DEAD$ip "
+            fi
+          done
+
+          echo "== Domains on dead proxies (ready lines for my-hosts) =="
+          echo "$LIST" | awk -v dead="$DEAD" -v good="${GOOD:-NO_LIVE_PROXY}" '
+            !seen[tolower($2)]++ && index(dead, " " $1 " ") {print good, $2; n++}
+            END {if (!n) print "none"}'
+
+          echo "== Subnets (NEW = add to geohide-allow) =="
+          for net in $(echo "$LIST" | awk '{print $1}' | awk -F. '{print $1"."$2"."$3".0/24"}' | sort -u); do
+            case " $ALLOW " in *" $net "*) echo "$net ok" ;; *) echo "$net NEW" ;; esac
+          done
